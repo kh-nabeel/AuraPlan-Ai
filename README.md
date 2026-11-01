@@ -24,7 +24,11 @@ auraplan-react-ts/
 │   │   └── presets.ts
 │   ├── services/            # Dedicated Google Gemini AI service with automated failover
 │   │   └── geminiService.ts
+│   ├── hooks/               # Custom React hooks (useEventPlanner, useCoPilotChat)
+│   │   ├── useEventPlanner.ts
+│   │   └── useCoPilotChat.ts
 │   ├── components/          # Reusable, memoized React UI components (React.memo)
+│   │   ├── ErrorBoundary.tsx
 │   │   ├── Header.tsx
 │   │   ├── HeroSection.tsx
 │   │   ├── ContextStudio.tsx
@@ -36,15 +40,17 @@ auraplan-react-ts/
 │   │   ├── TestSuiteModal.tsx
 │   │   ├── ApiConfigModal.tsx
 │   │   └── Footer.tsx
-│   ├── App.tsx              # Master state orchestrator (< 350 lines)
+│   ├── App.tsx              # Master state orchestrator (< 300 lines)
 │   ├── main.tsx
 │   └── index.css
-├── tests/                   # 23 Automated unit tests across 5 test suites (Vitest)
+├── tests/                   # 30 Automated unit tests across 7 test suites (Vitest)
 │   ├── planningEngine.test.ts
 │   ├── geminiService.test.ts
 │   ├── security.test.ts
 │   ├── budgetCalculations.test.ts
-│   └── timelineEngine.test.ts
+│   ├── timelineEngine.test.ts
+│   ├── formatters.test.ts
+│   └── presets.test.ts
 ├── firebase.json            # Security headers (CSP, HSTS, X-Frame-Options) & SPA routing
 ├── vite.config.ts           # Rollup manualChunks code-splitting (React, Recharts, Lucide)
 └── package.json

@@ -3,17 +3,8 @@
 // ============================================================================
 
 import React, { useState, useMemo, useCallback } from 'react';
-import {
-  EventConfig,
-  EventVertical,
-  TaskStatus,
-  VendorStatus,
-  MilestoneItem,
-  VendorItem,
-  ChatMessage,
-  TestCheckItem
-} from './types';
-import { sanitizeText, escapeHTML, clampNum } from './utils/security';
+import { EventVertical, TestCheckItem } from './types';
+import { escapeHTML, clampNum } from './utils/security';
 import { formatMoney } from './utils/formatters';
 import {
   computeDynamicBudget,
@@ -23,11 +14,11 @@ import {
   generateCreativeIdeas
 } from './engine/planningEngine';
 import { VERTICAL_PRESETS } from './engine/presets';
-import {
-  askGeminiEventStrategist,
-  DEFAULT_GEMINI_API_KEY,
-  isGeminiKeyActive
-} from './services/geminiService';
+import { DEFAULT_GEMINI_API_KEY, isGeminiKeyActive } from './services/geminiService';
+
+// Custom Hooks
+import { useEventPlanner } from './hooks/useEventPlanner';
+import { useCoPilotChat } from './hooks/useCoPilotChat';
 
 // Modular UI Components
 import { Header } from './components/Header';
@@ -50,15 +41,11 @@ export * from './engine/planningEngine';
 export * from './engine/presets';
 export * from './services/geminiService';
 
+/**
+ * Main application coordinator for AuraPlan AI.
+ */
 export default function App() {
-  const [config, setConfig] = useState<EventConfig>(VERTICAL_PRESETS.wedding);
-  const [customActuals, setCustomActuals] = useState<Record<string, number>>({});
-  const [taskStatuses, setTaskStatuses] = useState<Record<string, TaskStatus>>({});
-  const [customTasks, setCustomTasks] = useState<MilestoneItem[]>([]);
-  const [vendorStatuses, setVendorStatuses] = useState<Record<string, VendorStatus>>({});
-  const [customVendors, setCustomVendors] = useState<VendorItem[]>([]);
-
-  // UI Modes
+  // Global Display & Mode States
   const [darkMode, setDarkMode] = useState(false);
   const [highContrast, setHighContrast] = useState(false);
   const [showTestModal, setShowTestModal] = useState(false);
@@ -66,234 +53,40 @@ export default function App() {
   const [apiKey, setApiKey] = useState<string>(() => DEFAULT_GEMINI_API_KEY);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  // Co-Pilot Chat State
-  const [isSynthesizing, setIsSynthesizing] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      source: 'Google Gemini 3.5 Flash Live • Dedicated Free Tier',
-      text: 'Welcome to AuraPlan AI. Dedicated Gemini AI service is connected and ready. Adjust parameters in the context studio below, or click any prompt card to generate tailored savings strategies, vendor negotiation drafts, or contingency protocols.'
-    }
-  ]);
-
   const triggerToast = useCallback((msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 3000);
   }, []);
 
-  // Derived computations via pure engine functions
-  const baseBudgetItems = useMemo(() => computeDynamicBudget(config), [config]);
-  const budgetItems = useMemo(
-    () =>
-      baseBudgetItems.map((item) => ({
-        ...item,
-        actual: customActuals[item.id] !== undefined ? customActuals[item.id] : item.allocated
-      })),
-    [baseBudgetItems, customActuals]
+  // Planning Engine Hook
+  const {
+    config,
+    budgetItems,
+    health,
+    timelineItems,
+    vendorItems,
+    ideas,
+    totalActual,
+    budgetVariance,
+    completedTasksCount,
+    progressPct,
+    selectPreset,
+    updateConfigField,
+    handleUpdateActual,
+    handleResetActuals,
+    cycleTaskStatus,
+    cycleVendorStatus,
+    handleAddCustomTask,
+    handleAddCustomVendor
+  } = useEventPlanner(triggerToast);
+
+  // GenAI Co-Pilot Hook
+  const { messages, isSynthesizing, askCoPilot } = useCoPilotChat(
+    config,
+    health,
+    budgetItems,
+    apiKey
   );
-
-  const health = useMemo(() => evaluateEventHealth(config), [config]);
-
-  const timelineItems = useMemo(() => {
-    const base = computeTimeline(config).map((t) => ({
-      ...t,
-      status: taskStatuses[t.id] || t.status
-    }));
-    return [...base, ...customTasks];
-  }, [config, taskStatuses, customTasks]);
-
-  const vendorItems = useMemo(() => {
-    const base = computeVendors(config).map((v) => ({
-      ...v,
-      status: vendorStatuses[v.id] || v.status
-    }));
-    return [...base, ...customVendors];
-  }, [config, vendorStatuses, customVendors]);
-
-  const ideas = useMemo(() => generateCreativeIdeas(config), [config]);
-
-  const totalActual = useMemo(
-    () => budgetItems.reduce((sum, i) => sum + i.actual, 0),
-    [budgetItems]
-  );
-  const budgetVariance = config.budget - totalActual;
-  const completedTasksCount = useMemo(
-    () => timelineItems.filter((t) => t.status === 'completed').length,
-    [timelineItems]
-  );
-  const progressPct = Math.round((completedTasksCount / Math.max(1, timelineItems.length)) * 100);
-
-  // Callbacks
-  const selectPreset = useCallback((type: EventVertical) => {
-    setConfig(VERTICAL_PRESETS[type]);
-    setCustomActuals({});
-    setCustomTasks([]);
-    setCustomVendors([]);
-    triggerToast(`Loaded ${type.toUpperCase()} template`);
-  }, [triggerToast]);
-
-  const updateConfigField = useCallback(<K extends keyof EventConfig>(key: K, value: EventConfig[K]) => {
-    setConfig((prev) => ({ ...prev, [key]: value }));
-  }, []);
-
-  const handleUpdateActual = useCallback((id: string, value: number) => {
-    setCustomActuals((prev) => ({ ...prev, [id]: value }));
-  }, []);
-
-  const handleResetActuals = useCallback(() => {
-    setCustomActuals({});
-    triggerToast('Reset quote simulations to baseline target');
-  }, [triggerToast]);
-
-  const cycleTaskStatus = useCallback((task: MilestoneItem) => {
-    const order: TaskStatus[] = ['pending', 'in_progress', 'completed'];
-    const next = order[(order.indexOf(task.status) + 1) % order.length];
-    if (task.id.startsWith('custom_')) {
-      setCustomTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, status: next } : t)));
-    } else {
-      setTaskStatuses((prev) => ({ ...prev, [task.id]: next }));
-    }
-  }, []);
-
-  const cycleVendorStatus = useCallback((vendor: VendorItem) => {
-    const order: VendorStatus[] = ['Pending', 'Shortlisted', 'Contacted', 'Booked'];
-    const next = order[(order.indexOf(vendor.status) + 1) % order.length];
-    if (vendor.id.startsWith('cv_')) {
-      setCustomVendors((prev) => prev.map((v) => (v.id === vendor.id ? { ...v, status: next } : v)));
-    } else {
-      setVendorStatuses((prev) => ({ ...prev, [vendor.id]: next }));
-    }
-  }, []);
-
-  const handleAddCustomTask = useCallback((title: string) => {
-    setCustomTasks((prev) => [
-      ...prev,
-      {
-        id: `custom_${Date.now()}`,
-        phase: 'Custom Milestone',
-        title,
-        daysBefore: Math.min(7, config.daysCountdown),
-        targetDate: new Date().toISOString().split('T')[0],
-        priority: 'High',
-        status: 'pending'
-      }
-    ]);
-    triggerToast('Added custom milestone');
-  }, [config.daysCountdown, triggerToast]);
-
-  const handleAddCustomVendor = useCallback((category: string, cap: number) => {
-    setCustomVendors((prev) => [
-      ...prev,
-      {
-        id: `cv_${Date.now()}`,
-        category,
-        leadTime: '2–4 Weeks Out',
-        estimatedCap: cap,
-        status: 'Shortlisted',
-        vettingQuestion: 'What are your cancellation, weather postponement, and overtime terms?'
-      }
-    ]);
-    triggerToast('Added custom vendor to checklist');
-  }, [triggerToast]);
-
-  // Co-Pilot Chat Synthesis
-  const askCoPilot = useCallback(async (promptText: string) => {
-    const cleanQ = sanitizeText(promptText, 350);
-    if (!cleanQ) return;
-
-    const userMsg: ChatMessage = { id: `u_${Date.now()}`, role: 'user', text: cleanQ };
-    setMessages((prev) => [...prev, userMsg]);
-    setIsSynthesizing(true);
-
-    if (isGeminiKeyActive(apiKey)) {
-      try {
-        const geminiRes = await askGeminiEventStrategist(
-          cleanQ,
-          {
-            eventName: config.eventName,
-            eventType: config.eventType,
-            subStyle: config.subStyle,
-            currency: config.currency,
-            budget: config.budget,
-            guestCount: config.guestCount,
-            daysCountdown: config.daysCountdown,
-            city: config.city,
-            setting: config.setting,
-            priority: config.priority,
-            dietaryNotes: config.dietaryNotes,
-            accessibilityRequired: config.accessibilityRequired,
-            perGuest: health.perGuest,
-            feasibilityScore: health.score,
-            feasibilityLabel: health.label,
-            topBudgetCategories: budgetItems.slice(0, 3).map((b) => ({
-              name: b.name,
-              allocated: b.allocated,
-              pct: b.pct
-            }))
-          },
-          apiKey
-        );
-
-        if (geminiRes.success && geminiRes.text) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `a_${Date.now()}`,
-              role: 'assistant',
-              source: geminiRes.model,
-              text: sanitizeText(geminiRes.text, 3500)
-            }
-          ]);
-          setIsSynthesizing(false);
-          return;
-        }
-      } catch (_e) {
-        // Fall back to built-in deterministic engine
-      }
-    }
-
-    setTimeout(() => {
-      const q = cleanQ.toLowerCase();
-      let reply = '';
-      if (q.includes('cut') || q.includes('save') || q.includes('15%') || q.includes('budget')) {
-        const targetSave = Math.round(config.budget * 0.15);
-        reply =
-          `Strategic 15% Reduction Plan (${formatMoney(targetSave, config.currency)}) for "${config.eventName}":\n` +
-          `• Bundle ${budgetItems[0].name} (${formatMoney(budgetItems[0].allocated, config.currency)}): Negotiate combined production package to save ~${formatMoney(budgetItems[0].allocated * 0.18, config.currency)}.\n` +
-          `• High-Efficiency Menu Curation: Replace continuous buffets with 2 focused interactive live counters (${config.dietaryNotes}) saving ~${formatMoney(config.budget * 0.05, config.currency)}.\n` +
-          `• Spatial Priority: Concentrate 75% of decor investment on the main focal stage and entry installation.`;
-      } else if (q.includes('email') || q.includes('vendor') || q.includes('quote') || q.includes('negotiate')) {
-        const targetCap = Math.round(budgetItems[1].allocated * 0.9);
-        reply =
-          `Itemized Vendor Negotiation Draft:\n\n` +
-          `Subject: Proposal Request — ${config.eventName} (${config.guestCount} Guests in ${config.city})\n\n` +
-          `Hello Team,\nWe are locking partners for an upcoming ${config.eventType} (${config.setting} setting) in ${config.city} scheduled in ${config.daysCountdown} days for ${config.guestCount} guests. ` +
-          `Our target ceiling for this module is ${formatMoney(targetCap, config.currency)} with strict adherence to ${config.dietaryNotes}${config.accessibilityRequired ? ' and inclusive accessibility standards' : ''}.\n` +
-          `Please provide your milestone payment schedule, weather contingency policy, and itemized deliverables.`;
-      } else if (q.includes('rain') || q.includes('weather') || q.includes('backup') || q.includes('outdoor')) {
-        const bufferItem = budgetItems.find((i) => i.id === 'contingency');
-        reply =
-          `Weather & Operations Contingency Protocol for ${config.city} (${config.setting.toUpperCase()}):\n` +
-          `• Contingency Buffer: ${formatMoney(bufferItem ? bufferItem.allocated : config.budget * 0.06, config.currency)} is locked in reserve.\n` +
-          `• 48-Hour Threshold Trigger: Require contract clauses securing clear-span marquee tenting and elevated subflooring if precipitation probability exceeds 35%.\n` +
-          `• Power Continuity: Deploy a 62.5 kVA silent backup generator with covered cable ramps across all guest routes.`;
-      } else {
-        reply =
-          `Operational Run-of-Show Blueprint for "${config.eventName}":\n` +
-          `• Per-Guest Spend: ${formatMoney(health.perGuest, config.currency)}/guest (${health.label}, Score ${health.score}/100).\n` +
-          `• T-4 Hours: Stage load-in, acoustic calibration, and ${config.accessibilityRequired ? 'accessibility ramp verification' : 'lighting cue checks'}.\n` +
-          `• Hour 0: Guest arrival & digital credential check-in for ${config.guestCount} attendees.\n` +
-          `• Hour 1.5: Main focal ceremony / presentation followed by culinary service.`;
-      }
-
-      setMessages((prev) => [
-        ...prev,
-        { id: `a_${Date.now()}`, role: 'assistant', source: 'AuraPlan Financial & Planning Engine', text: reply }
-      ]);
-      setIsSynthesizing(false);
-    }, 280);
-  }, [apiKey, config, health, budgetItems]);
 
   // Export Blueprint as Markdown
   const handleExportMarkdown = useCallback(() => {
@@ -326,7 +119,7 @@ export default function App() {
     triggerToast('Exported Event Blueprint (.md)');
   }, [config, health, budgetItems, timelineItems, vendorItems, triggerToast]);
 
-  // Automated In-Browser Test Suite
+  // Automated In-Browser Test Suite (10 Real-Time Verifications)
   const testResults: TestCheckItem[] = useMemo(() => {
     const checks: TestCheckItem[] = [];
 
@@ -411,11 +204,14 @@ export default function App() {
       detail: 'Free-tier Gemini key configured with gemini-3.5-flash & failover'
     });
 
-    // 10. Memory & Performance: Zero Calculation Drift
+    // 10. Performance: Zero Floating-Point Drift
     checks.push({
       name: 'Performance: Zero Floating-Point Drift on Big Budget Capital',
-      pass: computeDynamicBudget({ ...VERTICAL_PRESETS.wedding, budget: 1547890 })
-        .reduce((sum, item) => sum + item.allocated, 0) === 1547890,
+      pass:
+        computeDynamicBudget({ ...VERTICAL_PRESETS.wedding, budget: 1547890 }).reduce(
+          (sum, item) => sum + item.allocated,
+          0
+        ) === 1547890,
       detail: 'Strict integer cent/rupee normalization prevents financial leakage'
     });
 
@@ -456,7 +252,9 @@ export default function App() {
   const mutedText = highContrast ? 'text-yellow-200' : darkMode ? 'text-zinc-400' : 'text-zinc-500';
 
   return (
-    <div className={`min-h-screen transition-colors duration-200 font-sans selection:bg-[#C3FF16] selection:text-black ${themeBg} bg-tinker-grid`}>
+    <div
+      className={`min-h-screen transition-colors duration-200 font-sans selection:bg-[#C3FF16] selection:text-black ${themeBg} bg-tinker-grid`}
+    >
       {/* Toast Notification */}
       {toastMsg && (
         <div
@@ -547,7 +345,8 @@ export default function App() {
                 Creative Direction &amp; Architectural AI Co-Pilot
               </h2>
               <p className={`text-sm mt-1 max-w-2xl ${mutedText}`}>
-                Theme aesthetics, culinary curation, and real-time interactive consultations with Google Gemini 3.5 Flash.
+                Theme aesthetics, culinary curation, and real-time interactive consultations with
+                Google Gemini 3.5 Flash.
               </p>
             </div>
 
@@ -597,7 +396,9 @@ export default function App() {
         setApiKey={setApiKey}
         onSave={() => {
           setShowApiModal(false);
-          triggerToast(isGeminiKeyActive(apiKey) ? 'Gemini 3.5 Flash Live Connected' : 'Using Context Engine');
+          triggerToast(
+            isGeminiKeyActive(apiKey) ? 'Gemini 3.5 Flash Live Connected' : 'Using Context Engine'
+          );
         }}
         cardStyle={cardStyle}
         monoTag={monoTag}
